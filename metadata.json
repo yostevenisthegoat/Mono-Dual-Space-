@@ -1,0 +1,6 @@
+{
+  "name": "Mono Dual-Space",
+  "description": "Privacy-focused, open-source Android application cloning and multi-account management utility using Android Managed Work Profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

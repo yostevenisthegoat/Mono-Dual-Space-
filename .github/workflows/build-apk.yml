@@ -1,0 +1,225 @@
+name: Build and Release Public APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Publish APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Temurin Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Verify Java environment
+        run: |
+          set -e
+          echo "JAVA_HOME=${JAVA_HOME:-UNSET}"
+          if ! command -v java >/dev/null 2>&1; then
+            echo "ERROR: Java executable could not be detected."
+            exit 1
+          fi
+          java -version
+          JAVA_VERSION_RAW=$(java -version 2>&1 | head -n 1 | sed -E 's/.*version "([^"]+)".*/\1/')
+          if [ -z "$JAVA_VERSION_RAW" ]; then
+            echo "ERROR: Unable to parse active Java version."
+            exit 1
+          fi
+          JAVA_MAJOR=$(echo "$JAVA_VERSION_RAW" | cut -d'.' -f1)
+          if [ "$JAVA_MAJOR" = "1" ]; then
+            JAVA_MAJOR=$(echo "$JAVA_VERSION_RAW" | cut -d'.' -f2)
+          fi
+          echo "Detected Java major version: $JAVA_MAJOR"
+          if ! [ "$JAVA_MAJOR" -ge 17 ] 2>/dev/null; then
+            echo "ERROR: Java 17 or newer is required, found $JAVA_VERSION_RAW."
+            exit 1
+          fi
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      - name: Create temporary debug keystore
+        run: |
+          set -e
+          if [ ! -f ./debug.keystore ]; then
+            KEYTOOL_BIN="${JAVA_HOME}/bin/keytool"
+            if [ ! -x "$KEYTOOL_BIN" ]; then
+              KEYTOOL_BIN="$(command -v keytool)"
+            fi
+            "$KEYTOOL_BIN" -genkeypair \
+              -v \
+              -keystore ./debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+          else
+            echo "Existing ./debug.keystore found; skipping generation."
+          fi
+          if [ ! -f ./debug.keystore ]; then
+            echo "ERROR: ./debug.keystore was not created."
+            exit 1
+          fi
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Extract App Metadata and Rename APK
+        id: metadata
+        run: |
+          set -e
+          RAW_VERSION=""
+          if [ -f app/build.gradle.kts ]; then
+            RAW_VERSION=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          fi
+          if [ -z "$RAW_VERSION" ] && [ -f gradle/libs.versions.toml ]; then
+            RAW_VERSION=$(grep -E '^(versionName|appVersion)\s*=' gradle/libs.versions.toml | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          fi
+          if [ -z "$RAW_VERSION" ]; then
+            RAW_VERSION="1.0.0"
+          fi
+
+          RAW_NAME=""
+          if [ -f app/src/main/res/values/strings.xml ]; then
+            RAW_NAME=$(grep -E '<string name="app_name">' app/src/main/res/values/strings.xml | head -n 1 | sed -E 's/.*<string name="app_name">([^<]+)<\/string>.*/\1/' || true)
+          fi
+          if [ -z "$RAW_NAME" ] && [ -f settings.gradle.kts ]; then
+            RAW_NAME=$(grep -E 'rootProject\.name\s*=' settings.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          fi
+          if [ -z "$RAW_NAME" ]; then
+            RAW_NAME="AndroidApp"
+          fi
+
+          APP_NAME=$(echo "$RAW_NAME" | tr ' ' '-' | sed -E 's/[^A-Za-z0-9._-]//g')
+          APP_VERSION=$(echo "$RAW_VERSION" | sed -E 's/[^A-Za-z0-9._-]//g')
+          APK_FILE_NAME="${APP_NAME}-v${APP_VERSION}.apk"
+
+          SOURCE_APK="app/build/outputs/apk/debug/app-debug.apk"
+          TARGET_APK="app/build/outputs/apk/debug/${APK_FILE_NAME}"
+
+          if [ ! -f "$SOURCE_APK" ]; then
+            echo "ERROR: Expected APK not found at $SOURCE_APK"
+            exit 1
+          fi
+
+          cp "$SOURCE_APK" "$TARGET_APK"
+          if [ ! -f "$TARGET_APK" ]; then
+            echo "ERROR: Failed to create renamed APK at $TARGET_APK"
+            exit 1
+          fi
+
+          echo "APP_NAME=${APP_NAME}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+          echo "APK_FILE_NAME=${APK_FILE_NAME}" >> "$GITHUB_ENV"
+
+          echo "app_name=${APP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "apk_file_name=${APK_FILE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-v${{ env.APP_VERSION }}
+          path: app/build/outputs/apk/debug/${{ env.APK_FILE_NAME }}
+          if-no-files-found: error
+
+      - name: Prepare APK release asset and changelog
+        id: release_prep
+        run: |
+          set -e
+          RELEASE_DIR=$(mktemp -d)
+          SOURCE_APK="app/build/outputs/apk/debug/${{ env.APK_FILE_NAME }}"
+          DEST_APK="${RELEASE_DIR}/${{ env.APK_FILE_NAME }}"
+
+          cp "$SOURCE_APK" "$DEST_APK"
+          if [ ! -f "$DEST_APK" ]; then
+            echo "ERROR: Failed to copy APK into release directory."
+            exit 1
+          fi
+
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG_LINES=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" -n 15)
+          else
+            CHANGELOG_LINES=$(git log --pretty=format:"- %s (%h)" -n 10)
+          fi
+          if [ -z "$CHANGELOG_LINES" ]; then
+            CHANGELOG_LINES="- Initial open-source release (${GITHUB_SHA:0:7})"
+          fi
+
+          echo "asset_path=${DEST_APK}" >> "$GITHUB_OUTPUT"
+          EOF_MARKER="MONO_CHANGELOG_$(date +%s%N)"
+          {
+            echo "changelog<<${EOF_MARKER}"
+            echo "${CHANGELOG_LINES}"
+            echo "${EOF_MARKER}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to Public GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGELOG_CONTENT: ${{ steps.release_prep.outputs.changelog }}
+          APP_NAME: ${{ env.APP_NAME }}
+          APP_VERSION: ${{ env.APP_VERSION }}
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -e
+          TAG_NAME="v${{ env.APP_VERSION }}-build-${{ github.run_number }}"
+          RELEASE_TITLE="${{ env.APP_NAME }} v${{ env.APP_VERSION }} (Build #${{ github.run_number }})"
+
+          NOTES_FILE=$(mktemp)
+          cat <<'NOTES_EOF' > "$NOTES_FILE"
+          ## 📢 What's New
+          __CHANGELOG__
+
+          ---
+
+          ## 🌐 Open Source Build
+          Built publicly by GitHub Actions.
+
+          - **App Name:** __APP_NAME__
+          - **Version:** v__APP_VERSION__
+          - **Run Number:** #__RUN_NUMBER__
+          - **Commit SHA:** `__COMMIT_SHA__`
+          NOTES_EOF
+
+          python3 - "$NOTES_FILE" <<'PY_EOF'
+          import os, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+          text = text.replace("          ", "")
+          text = text.replace("__CHANGELOG__", os.environ.get("CHANGELOG_CONTENT", "- Build update"))
+          text = text.replace("__APP_NAME__", os.environ.get("APP_NAME", ""))
+          text = text.replace("__APP_VERSION__", os.environ.get("APP_VERSION", ""))
+          text = text.replace("__RUN_NUMBER__", os.environ.get("RUN_NUMBER", ""))
+          text = text.replace("__COMMIT_SHA__", os.environ.get("COMMIT_SHA", ""))
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+          PY_EOF
+
+          gh release create "$TAG_NAME" "${{ steps.release_prep.outputs.asset_path }}" \
+            --title "$RELEASE_TITLE" \
+            --notes-file "$NOTES_FILE" \
+            --latest

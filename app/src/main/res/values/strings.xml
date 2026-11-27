@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Mono Dual-Space</string>
+    <string name="app_tagline">One device. Multiple spaces.</string>
+    <string name="device_admin_description">Manages an isolated Android Work Profile for Mono Dual-Space application separation.</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_applications">Applications</string>
+    <string name="nav_spaces">Spaces</string>
+    <string name="nav_privacy">Privacy</string>
+    <string name="nav_settings">Settings</string>
+    <string name="action_add_application">Add Application</string>
+    <string name="action_launch">Launch</string>
+    <string name="action_lock_now">Lock Now</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_configure_space">Configure Work Space</string>
+    <string name="biometric_title">Unlock Mono Dual-Space</string>
+    <string name="biometric_subtitle">Verify your identity to access isolated spaces</string>
+    <string name="biometric_negative">Use PIN</string>
+</resources>
